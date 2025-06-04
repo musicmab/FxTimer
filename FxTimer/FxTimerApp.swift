@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-@main
+//@main
 struct FxTimerApp: App {
     var body: some Scene {
         WindowGroup {
