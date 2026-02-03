@@ -15,7 +15,21 @@ struct ReminderItem: Identifiable, Codable, Equatable {
     var minute: Int = 0
     var text: String = "お知らせ"
 
+    // 自動取り込み識別（TradingEconomics 等）
+    var source: String? = nil          // "te"
+    var externalId: String? = nil      // CalendarID 等（任意）
+
     var timeText: String { String(format: "%02d:%02d", hour, minute) }
+}
+
+// MARK: - Trading Economics Calendar（最小デコード）
+private struct TECalendarEvent: Codable {
+    let CalendarID: String?
+    let Date: String?          // UTCのISO8601
+    let Country: String?
+    let Event: String?
+    let Category: String?
+    let Importance: Int?       // 1 low, 2 medium, 3 high
 }
 
 // MARK: - アプリ本体
@@ -51,12 +65,14 @@ final class IntervalManager: ObservableObject {
         static let s30  = "announce30sec"
         static let lang = "announceLang"
 
-        // ★ お知らせ（複数）
+        // お知らせ（複数）
         static let remindersJson = "remindersJson"
         static let reminderAlarm = "reminderAlarmEnabled"
-
-        // ★ お知らせ読み上げ
         static let reminderSpeak = "reminderSpeakEnabled"
+
+        // 指標取得（Trading Economics）
+        static let teApiKey = "teApiKey"
+        static let teAutoImport = "teAutoImportEnabled"
     }
 
     //==== ユーザ設定 ----------------------------------------------------------
@@ -76,12 +92,15 @@ final class IntervalManager: ObservableObject {
     @AppStorage(Keys.s30)  var announce30Sec = false
     @AppStorage(Keys.lang) var lang = "ja"
 
-    // ★ お知らせ保存（JSON）
+    // お知らせ保存（JSON）
     @AppStorage(Keys.remindersJson) private var remindersJson: String = "[]"
-    // ★ お知らせアラーム音
     @AppStorage(Keys.reminderAlarm) var reminderAlarmEnabled: Bool = true
-    // ★ お知らせ読み上げ
     @AppStorage(Keys.reminderSpeak) var reminderSpeakEnabled: Bool = true
+
+    // 指標APIキー（アプリ内保存）
+    @AppStorage(Keys.teApiKey) var teApiKey: String = ""
+    // 起動時に自動取り込み（任意）
+    @AppStorage(Keys.teAutoImport) var teAutoImportEnabled: Bool = false
 
     //==== UI バインディング ---------------------------------------------------
     @Published var status    = "停止中"
@@ -90,9 +109,12 @@ final class IntervalManager: ObservableObject {
     /// <分数:Int, 経過率 0.0‥1.0:Double>
     @Published var progress: [Int: Double] = [:]
 
-    // ★ お知らせ表示（バナー）
+    // お知らせ表示（バナー）
     @Published var reminderBannerText: String = ""
     @Published var isReminderVisible: Bool = false
+
+    // 指標取得ステータス
+    @Published var indicatorStatus: String = ""
 
     //==== 内部状態 ------------------------------------------------------------
     private var timer: DispatchSourceTimer?
@@ -102,10 +124,10 @@ final class IntervalManager: ObservableObject {
     private var lastCountdownSec: Int?
     private var isEnglish: Bool { lang == "en" }
 
-    // ★ お知らせ重複発火防止（同一分・同一ID）
+    // お知らせ重複発火防止（同一分・同一ID）
     private var firedReminderKeys = Set<String>()
 
-    // ★ お知らせアラーム音（SystemSound）
+    // お知らせアラーム音（SystemSound）
     private let reminderSoundID: SystemSoundID = 1005
 
     // MARK: - お知らせ（読み書き）
@@ -143,6 +165,11 @@ final class IntervalManager: ObservableObject {
                         leeway: .milliseconds(1))
         timer?.setEventHandler { [weak self] in self?.tick() }
         timer?.resume()
+
+        // 任意：スタート時に自動で指標を取り込む
+        if teAutoImportEnabled {
+            Task { await self.importHighImportanceUSJPIndicators30MinBefore() }
+        }
     }
 
     func stop() {
@@ -172,7 +199,7 @@ final class IntervalManager: ObservableObject {
 
         updateProgressBars(hour: hour, minute: min, second: sec)
 
-        // ★ お知らせチェック（複数）
+        // お知らせチェック（複数）
         checkReminders(now: now, hour: hour, minute: min, second: sec)
 
         switch sec {
@@ -207,7 +234,7 @@ final class IntervalManager: ObservableObject {
         }
     }
 
-    // ★ お知らせ（複数）判定：秒==0で、該当するものを全部発火
+    // MARK: - お知らせ（アプリ内）
     private func checkReminders(now: Date, hour: Int, minute: Int, second: Int) {
         guard second == 0 else { return }
 
@@ -216,9 +243,9 @@ final class IntervalManager: ObservableObject {
 
         // 今日の日付
         let cal = Calendar.current
-        let y = cal.component(.year,  from: now)
+        let y  = cal.component(.year,  from: now)
         let mo = cal.component(.month, from: now)
-        let d = cal.component(.day,   from: now)
+        let d  = cal.component(.day,   from: now)
 
         // この時刻に一致するお知らせを収集
         let matched = reminders.filter { $0.hour == hour && $0.minute == minute }
@@ -242,11 +269,9 @@ final class IntervalManager: ObservableObject {
             firedReminderKeys = Set(firedReminderKeys.suffix(120))
         }
 
-        // まとめて表示（複数件なら改行）
         fireReminderBanner(text: fireTexts.joined(separator: "\n"))
     }
 
-    // ★ お知らせ表示 + アラーム音 + 読み上げ
     private func fireReminderBanner(text: String) {
         reminderBannerText = text
 
@@ -254,7 +279,7 @@ final class IntervalManager: ObservableObject {
             AudioServicesPlaySystemSound(reminderSoundID)
         }
 
-        // ★ 読み上げ（複数件の改行は「。 」に変換）
+        // 読み上げ（複数件の改行は「。 」に変換）
         if reminderSpeakEnabled {
             let speakText = text
                 .replacingOccurrences(of: "\n", with: "。 ")
@@ -283,7 +308,94 @@ final class IntervalManager: ObservableObject {
         }
     }
 
-    /// 時計用文字列を HH:mm:ss で生成
+    // MARK: - 指標自動取得（Trading Economics）
+    /// 米国＋日本 / 高重要度(Importance=3)のみ / 発表30分前のReminderを自動生成
+    func importHighImportanceUSJPIndicators30MinBefore() async {
+        let key = teApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            indicatorStatus = "APIキーが未設定です。設定で入力してください。"
+            return
+        }
+
+        indicatorStatus = "取得中..."
+
+        do {
+            // Economic Calendar by Country を利用
+            // 例: https://api.tradingeconomics.com/calendar/country/United%20States,Japan?c=KEY&f=json
+            let countriesRaw = "United States,Japan"
+            let countries = countriesRaw.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? countriesRaw
+            guard let url = URL(string: "https://api.tradingeconomics.com/calendar/country/\(countries)?c=\(key)&f=json") else {
+                indicatorStatus = "URL生成に失敗しました。"
+                return
+            }
+
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let events = try JSONDecoder().decode([TECalendarEvent].self, from: data)
+
+            let now = Date()
+
+            // 解析（ISO8601 / 小数秒あり・なし両対応）
+            let isoA = ISO8601DateFormatter()
+            isoA.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let isoB = ISO8601DateFormatter()
+            isoB.formatOptions = [.withInternetDateTime]
+
+            // Tokyoで時刻計算するCalendar
+            var calTokyo = Calendar.current
+            calTokyo.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+
+            // 既存の自動取り込み（source=="te"）は入れ替え
+            var current = getReminders()
+            current.removeAll { $0.source == "te" }
+
+            var addedCount = 0
+
+            for e in events {
+                // 高重要度のみ（3） ※nil（未提供）も除外して「3だけ」に固定
+                guard e.Importance == 3 else { continue }
+
+                guard let dateStr = e.Date else { continue }
+                let releaseUTC = isoA.date(from: dateStr) ?? isoB.date(from: dateStr)
+                guard let releaseDate = releaseUTC else { continue }
+
+                // 過去は除外（必要なら当日分のみ等に変更可）
+                if releaseDate < now { continue }
+
+                // 発表30分前（絶対時刻として引く）
+                guard let alertDate = Calendar.current.date(byAdding: .minute, value: -30, to: releaseDate) else { continue }
+
+                // Tokyoカレンダーで hour/minute
+                let hour = calTokyo.component(.hour, from: alertDate)
+                let minute = calTokyo.component(.minute, from: alertDate)
+
+                let country = (e.Country ?? "")
+                let title = (e.Event ?? e.Category ?? "指標")
+                let shortCountry = (country == "United States") ? "米" : (country == "Japan" ? "日" : country)
+
+                // 表示テキスト（30分前）
+                let text = "【\(shortCountry)】\(title)（30分前）"
+
+                var item = ReminderItem()
+                item.enabled = true
+                item.hour = hour
+                item.minute = minute
+                item.text = text
+                item.source = "te"
+                item.externalId = e.CalendarID
+
+                current.append(item)
+                addedCount += 1
+            }
+
+            setReminders(current)
+            indicatorStatus = "取得完了：\(addedCount)件（米/日・高重要度・30分前）"
+
+        } catch {
+            indicatorStatus = "取得に失敗しました：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 時計/進捗
     private func updateClock(_ date: Date) {
         let cal = Calendar.current
         let h = cal.component(.hour,   from: date)
@@ -292,7 +404,6 @@ final class IntervalManager: ObservableObject {
         clockText = String(format: "%02d:%02d:%02d", h, m, s)
     }
 
-    /// 各インターバルの経過率を更新
     private func updateProgressBars(hour: Int, minute: Int, second: Int) {
         let currentSec = hour * 3600 + minute * 60 + second
         var dict: [Int: Double] = [:]
@@ -315,7 +426,6 @@ final class IntervalManager: ObservableObject {
         progress = dict
     }
 
-    /// 有効インターバル判定
     private func selectInterval(hour: Int,
                                 minute: Int,
                                 includeOne: Bool) -> Int? {
@@ -331,7 +441,7 @@ final class IntervalManager: ObservableObject {
         return nil
     }
 
-    // MARK: - 出力処理 --------------------------------------------------------
+    // MARK: - 出力処理
     private func intervalLabel(_ value: Int) -> String {
         switch value {
         case 480: return isEnglish ? "8-hour bar"  : "8時間足"
@@ -365,7 +475,7 @@ final class IntervalManager: ObservableObject {
         speak(isEnglish ? "\(value)" : "\(value)")
     }
 
-    // MARK: - ユーティリティ --------------------------------------------------
+    // MARK: - ユーティリティ
     private func speak(_ text: String) {
         if speech.isSpeaking { speech.stopSpeaking(at: .immediate) }
         let utt = AVSpeechUtterance(string: text)
@@ -389,7 +499,6 @@ final class IntervalManager: ObservableObject {
         UNUserNotificationCenter.current().add(r)
     }
 
-    /// 無音ループでバックグラウンド維持
     private func prepareBackgroundAudio() {
         guard enableBG else { return }
         do {
@@ -419,22 +528,18 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 VStack {
-                    //── ❶ 時計 ＋ プログレスバー（常に最上部） ──
+                    //── 時計 ＋ プログレスバー（最上部） ──
                     VStack(alignment: .center, spacing: 8) {
                         Text(mgr.clockText)
-                            .font(.system(size: 60,
-                                          weight: .bold,
-                                          design: .monospaced))
+                            .font(.system(size: 60, weight: .bold, design: .monospaced))
                             .foregroundColor(.green)
                             .padding(.top, 20)
-                            .frame(maxWidth: .infinity,
-                                   alignment: .center)
+                            .frame(maxWidth: .infinity, alignment: .center)
 
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(mgr.progress.keys.sorted(), id: \.self) { key in
                                 if let p = mgr.progress[key] {
-                                    IntervalProgressBar(minutes: key,
-                                                        progress: p)
+                                    IntervalProgressBar(minutes: key, progress: p)
                                 }
                             }
                         }
@@ -443,9 +548,8 @@ struct ContentView: View {
 
                     Spacer()
 
-                    //── ❸ お知らせ（スタートボタンの上） ─────
+                    //── お知らせ（スタートボタンの上） ─────
                     VStack(spacing: 16) {
-
                         if mgr.isReminderVisible {
                             Button {
                                 mgr.dismissReminder()
@@ -476,7 +580,7 @@ struct ContentView: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
 
-                        //── ボタン ＋ 設定リンク（常に最下部） ─────
+                        //── ボタン ＋ 設定リンク（最下部） ─────
                         VStack(spacing: 16) {
                             Button(mgr.isRunning ? "ストップ" : "スタート") {
                                 if mgr.isRunning {
@@ -501,27 +605,20 @@ struct ContentView: View {
                     .padding(.bottom, 40)
                 }
 
-                //──────────────── カウントダウン（中央オーバーレイ） ───────────────
+                //── カウントダウン（中央オーバーレイ） ─────
                 Group {
                     if mgr.status.starts(with: " ") {
                         Text(mgr.status.trimmingCharacters(in: .whitespaces))
-                            .font(.system(size: 200,
-                                          weight: .bold,
-                                          design: .monospaced))
+                            .font(.system(size: 200, weight: .bold, design: .monospaced))
                         + Text(" ")
-                            .font(.system(size: 200,
-                                          weight: .bold,
-                                          design: .monospaced))
+                            .font(.system(size: 200, weight: .bold, design: .monospaced))
                     } else {
                         Text(mgr.status)
-                            .font(.system(size: 50,
-                                          weight: .medium,
-                                          design: .monospaced))
+                            .font(.system(size: 50, weight: .medium, design: .monospaced))
                     }
                 }
                 .multilineTextAlignment(.center)
                 .padding(.top, 60)
-
             }
             .ignoresSafeArea(edges: .bottom)
             .navigationTitle("FX Interval")
@@ -561,6 +658,12 @@ struct ReminderEditorView: View {
                     DatePicker("時刻", selection: timeBinding, displayedComponents: [.hourAndMinute])
                     TextField("内容", text: $item.text, axis: .vertical)
                         .lineLimit(1...4)
+
+                    if item.source == "te" {
+                        Text("※ Trading Economics から自動生成された項目です。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 if let onDelete {
@@ -590,6 +693,7 @@ struct ReminderEditorView: View {
     }
 }
 
+// MARK: - Settings
 struct SettingsView: View {
     @EnvironmentObject var mgr: IntervalManager
 
@@ -611,38 +715,39 @@ struct SettingsView: View {
     @AppStorage(IntervalManager.Keys.s30)  var announce30Sec = false
     @AppStorage(IntervalManager.Keys.lang) var lang = "ja"
 
-    // ★ お知らせアラーム
+    // お知らせ
     @AppStorage(IntervalManager.Keys.reminderAlarm) var reminderAlarmEnabled = true
-    // ★ お知らせ読み上げ
     @AppStorage(IntervalManager.Keys.reminderSpeak) var reminderSpeakEnabled = true
 
-    // ★ 複数お知らせ（画面用）
+    // Trading Economics
+    @AppStorage(IntervalManager.Keys.teApiKey) var teApiKey: String = ""
+    @AppStorage(IntervalManager.Keys.teAutoImport) var teAutoImportEnabled: Bool = false
+
+    // 複数お知らせ（画面用）
     @State private var reminders: [ReminderItem] = []
     @State private var editingItem: ReminderItem? = nil
     @State private var isAdding: Bool = false
 
     var body: some View {
         Form {
-
             Section("効果音・通知") {
                 Toggle("チャイム音 (1013)", isOn: $enableBeep)
-                Toggle("振動",            isOn: $enableVibration)
-                Toggle("ローカル通知",    isOn: $enableNotification)
+                Toggle("振動", isOn: $enableVibration)
+                Toggle("ローカル通知", isOn: $enableNotification)
                 Toggle("バックグラウンド動作", isOn: $enableBG)
                 Toggle("30秒ごとに『30秒』と読み上げる", isOn: $announce30Sec)
             }
 
             Section("有効な時間足") {
-                Toggle("1 分足",   isOn: $on1)
-                Toggle("5 分足",   isOn: $on5)
-                Toggle("15 分足",  isOn: $on15)
-                Toggle("30 分足",  isOn: $on30)
+                Toggle("1 分足", isOn: $on1)
+                Toggle("5 分足", isOn: $on5)
+                Toggle("15 分足", isOn: $on15)
+                Toggle("30 分足", isOn: $on30)
                 Toggle("1 時間足", isOn: $on60)
                 Toggle("4 時間足", isOn: $on240)
                 Toggle("8 時間足", isOn: $on480)
             }
 
-            // ★ お知らせ（複数）
             Section("お知らせ") {
                 Toggle("ポップアップ時にアラーム音", isOn: $reminderAlarmEnabled)
                 Toggle("お知らせ内容を読み上げる", isOn: $reminderSpeakEnabled)
@@ -652,7 +757,8 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
-                    ForEach(reminders.sorted(by: { ($0.hour, $0.minute) < ($1.hour, $1.minute) })) { item in
+                    let sorted = reminders.sorted(by: { ($0.hour, $0.minute) < ($1.hour, $1.minute) })
+                    ForEach(sorted) { item in
                         Button {
                             editingItem = item
                         } label: {
@@ -682,6 +788,31 @@ struct SettingsView: View {
                 }
 
                 Text("※ メイン画面のスタートボタンの上に表示されます（30秒で自動消去、タップで消去）。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            // 指標（自動取得）
+            Section("指標発表（自動取得）") {
+                TextField("Trading Economics APIキー（c=...）", text: $teApiKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+
+                Toggle("スタート時に自動で取り込む", isOn: $teAutoImportEnabled)
+
+                Button {
+                    Task { await mgr.importHighImportanceUSJPIndicators30MinBefore() }
+                } label: {
+                    Label("米/日・高重要度のみを取得して30分前通知に登録", systemImage: "arrow.down.circle")
+                }
+
+                if !mgr.indicatorStatus.isEmpty {
+                    Text(mgr.indicatorStatus)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Text("※ 重要度「高(3)」だけを取り込みます。発表30分前の時刻でお知らせを自動生成します。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -735,7 +866,7 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Progress Bar View -----------------------------------------------
+// MARK: - Progress Bar View
 struct IntervalProgressBar: View {
     let minutes: Int
     let progress: Double        // 0.0‥1.0
