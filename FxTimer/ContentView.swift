@@ -6,7 +6,9 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                //──────────────── レイアウト土台 ────────────────
                 VStack {
+                    //── ❶ 時計 ＋ プログレスバー（常に最上部） ──
                     VStack(alignment: .center, spacing: 8) {
                         Text(mgr.clockText)
                             .font(.system(size: 60, weight: .bold, design: .monospaced))
@@ -26,31 +28,31 @@ struct ContentView: View {
 
                     Spacer()
 
+                    //── ❸ ボタン ＋ 設定リンク（常に最下部） ─────
                     VStack(spacing: 16) {
-                        VStack(spacing: 16) {
-                            Button(mgr.isRunning ? "ストップ" : "スタート") {
-                                if mgr.isRunning {
-                                    mgr.stop()
-                                } else {
-                                    mgr.start()
-                                    mgr.playFeedback(text: "スタート")
-                                }
+                        Button(mgr.isRunning ? "ストップ" : "スタート") {
+                            if mgr.isRunning {
+                                mgr.stop()
+                            } else {
+                                mgr.start()
+                                mgr.playFeedback(text: "スタート")
                             }
-                            .padding(.vertical, 18)
-                            .frame(maxWidth: .infinity)
-                            .background(mgr.isRunning ? Color.red : Color.blue)
-                            .foregroundColor(.white)
-                            .font(.title2)
-                            .clipShape(Capsule())
-
-                            NavigationLink("設定", destination: SettingsView())
-                                .font(.headline)
                         }
-                        .padding(.horizontal)
+                        .padding(.vertical, 18)
+                        .frame(maxWidth: .infinity)
+                        .background(mgr.isRunning ? Color.red : Color.blue)
+                        .foregroundColor(.white)
+                        .font(.title2)
+                        .clipShape(Capsule())
+
+                        NavigationLink("設定", destination: SettingsView())
+                            .font(.headline)
                     }
+                    .padding(.horizontal)
                     .padding(.bottom, 40)
                 }
 
+                //──────────────── カウントダウン ───────────────
                 Group {
                     if mgr.status.starts(with: " ") {
                         Text(mgr.status.trimmingCharacters(in: .whitespaces))

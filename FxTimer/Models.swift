@@ -1,126 +1,105 @@
 import Foundation
 
-public struct ReminderItem: Identifiable, Codable, Equatable {
-    public var id: UUID = UUID()
-    public var enabled: Bool = true
+// MARK: - お知らせ（複数 + ルール）
+enum ReminderRule: Codable, Equatable {
+    case oneTime(year: Int, month: Int, day: Int)                 // 1回だけ
+    case daily                                                    // 毎日
+    case weekly(weekdays: [Int])                                  // 毎週（1=日 ... 7=土）
+    case biweekly(weekdays: [Int], anchorISODate: String)         // 隔週（基準週を anchor で決める）
+    case monthlyDay(day: Int)                                     // 毎月◯日
+    case monthlyNthWeekday(nth: Int, weekday: Int)                // 毎月 第nth weekday（nth: 1..4, -1=最終）
 
-    // 時刻
-    public var hour: Int = 9
-    public var minute: Int = 0
-
-    // 内容（通知本文）
-    public var text: String = "お知らせ"
-
-    // 繰り返し
-    // once / daily / weekly / weeklyN / monthlyDay / monthlyNthWeekday
-    public var recurrence: String = "daily"
-
-    // once 用（yyyy/mm/dd）
-    public var year: Int? = nil
-    public var month: Int? = nil
-    public var day: Int? = nil
-
-    // weekly / weeklyN / monthlyNthWeekday 用（Calendar.weekday: 1=日..7=土）
-    public var weekday: Int? = nil
-
-    // weeklyN（隔週/数週ごと）
-    public var weekInterval: Int? = nil
-    public var anchorYear: Int? = nil
-    public var anchorMonth: Int? = nil
-    public var anchorDay: Int? = nil
-
-    // monthlyDay（毎月◯日）
-    public var dayOfMonth: Int? = nil
-
-    // monthlyNthWeekday（第N/最終）
-    public var nthWeek: Int? = nil // 1..5 or -1
-
-    // 自動取り込み識別
-    public var source: String? = nil          // "te" / "preset"
-    public var externalId: String? = nil
-
-    public init() {}
-
-    public var timeText: String { String(format: "%02d:%02d", hour, minute) }
-
-    public var dateTextForOnce: String? {
-        guard recurrence == "once",
-              let y = year, let m = month, let d = day else { return nil }
-        return String(format: "%04d/%02d/%02d", y, m, d)
-    }
-}
-
-// MARK: - Trading Economics decoder helper
-enum JSONAny: Decodable {
-    case string(String), number(Double), int(Int), bool(Bool), null
-    case object([String: JSONAny]), array([JSONAny])
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if c.decodeNil() { self = .null; return }
-        if let v = try? c.decode(Int.self) { self = .int(v); return }
-        if let v = try? c.decode(Double.self) { self = .number(v); return }
-        if let v = try? c.decode(Bool.self) { self = .bool(v); return }
-        if let v = try? c.decode(String.self) { self = .string(v); return }
-        if let v = try? c.decode([String: JSONAny].self) { self = .object(v); return }
-        if let v = try? c.decode([JSONAny].self) { self = .array(v); return }
-        self = .null
-    }
-
-    var asString: String? {
-        switch self {
-        case .string(let s): return s
-        case .int(let i): return String(i)
-        case .number(let d):
-            if d.rounded() == d { return String(Int(d)) }
-            return String(d)
-        case .bool(let b): return b ? "true" : "false"
-        default: return nil
-        }
-    }
-    var asInt: Int? {
-        switch self {
-        case .int(let i): return i
-        case .number(let d): return d.rounded() == d ? Int(d) : nil
-        case .string(let s): return Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
-        default: return nil
-        }
-    }
-    var asDouble: Double? {
-        switch self {
-        case .number(let d): return d
-        case .int(let i): return Double(i)
-        case .string(let s): return Double(s.trimmingCharacters(in: .whitespacesAndNewlines))
-        default: return nil
-        }
-    }
-}
-
-struct TECalendarEvent: Decodable {
-    let CalendarID: String?
-    let DateRaw: JSONAny?
-    let Country: String?
-    let Event: String?
-    let Category: String?
-    let ImportanceRaw: JSONAny?
-
-    enum CodingKeys: String, CodingKey { case CalendarID, Date, Country, Event, Category, Importance }
+    private enum CodingKeys: String, CodingKey { case type, a, b, c }
+    private enum RuleType: String, Codable { case oneTime, daily, weekly, biweekly, monthlyDay, monthlyNthWeekday }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        CalendarID = try? c.decodeIfPresent(String.self, forKey: .CalendarID)
-        DateRaw = try? c.decodeIfPresent(JSONAny.self, forKey: .Date)
-        Country = try? c.decodeIfPresent(String.self, forKey: .Country)
-        Event = try? c.decodeIfPresent(String.self, forKey: .Event)
-        Category = try? c.decodeIfPresent(String.self, forKey: .Category)
-        ImportanceRaw = try? c.decodeIfPresent(JSONAny.self, forKey: .Importance)
+        let t = try c.decode(RuleType.self, forKey: .type)
+        switch t {
+        case .oneTime:
+            let a = try c.decode([Int].self, forKey: .a)
+            self = .oneTime(year: a[safe: 0] ?? 2000, month: a[safe: 1] ?? 1, day: a[safe: 2] ?? 1)
+        case .daily:
+            self = .daily
+        case .weekly:
+            let a = try c.decode([Int].self, forKey: .a)
+            self = .weekly(weekdays: a)
+        case .biweekly:
+            let a = try c.decode([Int].self, forKey: .a)
+            let b = try c.decode(String.self, forKey: .b)
+            self = .biweekly(weekdays: a, anchorISODate: b)
+        case .monthlyDay:
+            let a = try c.decode(Int.self, forKey: .a)
+            self = .monthlyDay(day: a)
+        case .monthlyNthWeekday:
+            let a = try c.decode([Int].self, forKey: .a)
+            self = .monthlyNthWeekday(nth: a[safe: 0] ?? 1, weekday: a[safe: 1] ?? 2)
+        }
     }
 
-    var dateString: String? { DateRaw?.asString }
-    var importanceInt: Int? { ImportanceRaw?.asInt }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .oneTime(let y, let m, let d):
+            try c.encode(RuleType.oneTime, forKey: .type)
+            try c.encode([y, m, d], forKey: .a)
+        case .daily:
+            try c.encode(RuleType.daily, forKey: .type)
+        case .weekly(let wds):
+            try c.encode(RuleType.weekly, forKey: .type)
+            try c.encode(wds, forKey: .a)
+        case .biweekly(let wds, let anchor):
+            try c.encode(RuleType.biweekly, forKey: .type)
+            try c.encode(wds, forKey: .a)
+            try c.encode(anchor, forKey: .b)
+        case .monthlyDay(let day):
+            try c.encode(RuleType.monthlyDay, forKey: .type)
+            try c.encode(day, forKey: .a)
+        case .monthlyNthWeekday(let nth, let weekday):
+            try c.encode(RuleType.monthlyNthWeekday, forKey: .type)
+            try c.encode([nth, weekday], forKey: .a)
+        }
+    }
 }
 
-struct TEApiError: Codable {
-    let error: String?
-    let message: String?
+struct ReminderItem: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var enabled: Bool = true
+
+    // 時刻
+    var hour: Int = 9
+    var minute: Int = 0
+
+    // 内容
+    var text: String = "お知らせ"
+
+    // ルール
+    var rule: ReminderRule = .daily
+
+    // 自動取り込み識別（TradingEconomics 等）
+    var source: String? = nil          // "te"
+    var externalId: String? = nil      // CalendarID 等（任意）
+
+    var timeText: String { String(format: "%02d:%02d", hour, minute) }
+}
+
+enum ImportanceFilter: Int, CaseIterable, Identifiable, Codable {
+    case all = 0
+    case highOnly = 3
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "すべて"
+        case .highOnly: return "高（3）だけ"
+        }
+    }
+}
+
+private extension Array {
+    subscript(safe idx: Int) -> Element? {
+        guard idx >= 0, idx < count else { return nil }
+        return self[idx]
+    }
 }

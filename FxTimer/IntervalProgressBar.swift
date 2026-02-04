@@ -2,7 +2,7 @@ import SwiftUI
 
 struct IntervalProgressBar: View {
     let minutes: Int
-    let progress: Double
+    let progress: Double        // 0.0‥1.0
 
     private var label: String {
         switch minutes {
@@ -23,7 +23,9 @@ struct IntervalProgressBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption)
+            Text(label)
+                .font(.caption)
+
             ProgressView(value: progress)
                 .progressViewStyle(.linear)
                 .tint(barColor)
