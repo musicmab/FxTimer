@@ -1,105 +1,123 @@
 import Foundation
 
-// MARK: - お知らせ（複数 + ルール）
+// MARK: - 繰り返しルール
 enum ReminderRule: Codable, Equatable {
-    case oneTime(year: Int, month: Int, day: Int)                 // 1回だけ
-    case daily                                                    // 毎日
-    case weekly(weekdays: [Int])                                  // 毎週（1=日 ... 7=土）
-    case biweekly(weekdays: [Int], anchorISODate: String)         // 隔週（基準週を anchor で決める）
-    case monthlyDay(day: Int)                                     // 毎月◯日
-    case monthlyNthWeekday(nth: Int, weekday: Int)                // 毎月 第nth weekday（nth: 1..4, -1=最終）
-
-    private enum CodingKeys: String, CodingKey { case type, a, b, c }
-    private enum RuleType: String, Codable { case oneTime, daily, weekly, biweekly, monthlyDay, monthlyNthWeekday }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        let t = try c.decode(RuleType.self, forKey: .type)
-        switch t {
-        case .oneTime:
-            let a = try c.decode([Int].self, forKey: .a)
-            self = .oneTime(year: a[safe: 0] ?? 2000, month: a[safe: 1] ?? 1, day: a[safe: 2] ?? 1)
-        case .daily:
-            self = .daily
-        case .weekly:
-            let a = try c.decode([Int].self, forKey: .a)
-            self = .weekly(weekdays: a)
-        case .biweekly:
-            let a = try c.decode([Int].self, forKey: .a)
-            let b = try c.decode(String.self, forKey: .b)
-            self = .biweekly(weekdays: a, anchorISODate: b)
-        case .monthlyDay:
-            let a = try c.decode(Int.self, forKey: .a)
-            self = .monthlyDay(day: a)
-        case .monthlyNthWeekday:
-            let a = try c.decode([Int].self, forKey: .a)
-            self = .monthlyNthWeekday(nth: a[safe: 0] ?? 1, weekday: a[safe: 1] ?? 2)
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .oneTime(let y, let m, let d):
-            try c.encode(RuleType.oneTime, forKey: .type)
-            try c.encode([y, m, d], forKey: .a)
-        case .daily:
-            try c.encode(RuleType.daily, forKey: .type)
-        case .weekly(let wds):
-            try c.encode(RuleType.weekly, forKey: .type)
-            try c.encode(wds, forKey: .a)
-        case .biweekly(let wds, let anchor):
-            try c.encode(RuleType.biweekly, forKey: .type)
-            try c.encode(wds, forKey: .a)
-            try c.encode(anchor, forKey: .b)
-        case .monthlyDay(let day):
-            try c.encode(RuleType.monthlyDay, forKey: .type)
-            try c.encode(day, forKey: .a)
-        case .monthlyNthWeekday(let nth, let weekday):
-            try c.encode(RuleType.monthlyNthWeekday, forKey: .type)
-            try c.encode([nth, weekday], forKey: .a)
-        }
-    }
+    case daily
+    case weekly(weekdays: [Int], intervalWeeks: Int)   // weekdays: 1...7 (Sun=1), intervalWeeks: 1=毎週,2=隔週
+    case monthlyDay(days: [Int])                       // 1...31（存在しない日はスキップ）
+    case monthlyNth(weekday: Int, nth: Int)            // 第n weekday（1..4）
+    case monthlyLast(weekday: Int)                     // 最終 weekday
+    case once(dateISO: String)                         // ISO8601（発表30分前の“1回”用）
 }
 
+// MARK: - お知らせモデル（複数）
 struct ReminderItem: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var enabled: Bool = true
-
-    // 時刻
     var hour: Int = 9
     var minute: Int = 0
-
-    // 内容
     var text: String = "お知らせ"
 
-    // ルール
     var rule: ReminderRule = .daily
 
     // 自動取り込み識別（TradingEconomics 等）
-    var source: String? = nil          // "te"
-    var externalId: String? = nil      // CalendarID 等（任意）
+    var source: String? = nil
+    var externalId: String? = nil
 
     var timeText: String { String(format: "%02d:%02d", hour, minute) }
 }
 
-enum ImportanceFilter: Int, CaseIterable, Identifiable, Codable {
-    case all = 0
-    case highOnly = 3
+// MARK: - Trading Economics: 値のゆらぎを吸収するための汎用デコーダ
+enum JSONAny: Decodable {
+    case string(String)
+    case number(Double)
+    case int(Int)
+    case bool(Bool)
+    case null
+    case object([String: JSONAny])
+    case array([JSONAny])
 
-    var id: Int { rawValue }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let v = try? c.decode(Int.self) { self = .int(v); return }
+        if let v = try? c.decode(Double.self) { self = .number(v); return }
+        if let v = try? c.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? c.decode(String.self) { self = .string(v); return }
+        if let v = try? c.decode([String: JSONAny].self) { self = .object(v); return }
+        if let v = try? c.decode([JSONAny].self) { self = .array(v); return }
+        self = .null
+    }
 
-    var title: String {
+    var asString: String? {
         switch self {
-        case .all: return "すべて"
-        case .highOnly: return "高（3）だけ"
+        case .string(let s): return s
+        case .int(let i): return String(i)
+        case .number(let d):
+            if d.rounded() == d { return String(Int(d)) }
+            return String(d)
+        case .bool(let b): return b ? "true" : "false"
+        default: return nil
+        }
+    }
+
+    var asInt: Int? {
+        switch self {
+        case .int(let i): return i
+        case .number(let d):
+            if d.rounded() == d { return Int(d) }
+            return nil
+        case .string(let s):
+            return Int(s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
+        default: return nil
+        }
+    }
+
+    var asDouble: Double? {
+        switch self {
+        case .number(let d): return d
+        case .int(let i): return Double(i)
+        case .string(let s):
+            return Double(s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
+        default: return nil
         }
     }
 }
 
-private extension Array {
-    subscript(safe idx: Int) -> Element? {
-        guard idx >= 0, idx < count else { return nil }
-        return self[idx]
+// MARK: - Trading Economics Calendar（ゆらぎ対応デコード）
+struct TECalendarEvent: Decodable {
+    let CalendarID: String?
+    let DateRaw: JSONAny?
+    let Country: String?
+    let Event: String?
+    let Category: String?
+    let ImportanceRaw: JSONAny?
+
+    enum CodingKeys: String, CodingKey {
+        case CalendarID
+        case Date
+        case Country
+        case Event
+        case Category
+        case Importance
     }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        CalendarID = try? c.decodeIfPresent(String.self, forKey: .CalendarID)
+        DateRaw = try? c.decodeIfPresent(JSONAny.self, forKey: .Date)
+        Country = try? c.decodeIfPresent(String.self, forKey: .Country)
+        Event = try? c.decodeIfPresent(String.self, forKey: .Event)
+        Category = try? c.decodeIfPresent(String.self, forKey: .Category)
+        ImportanceRaw = try? c.decodeIfPresent(JSONAny.self, forKey: .Importance)
+    }
+
+    var dateString: String? { DateRaw?.asString }
+    var importanceInt: Int? { ImportanceRaw?.asInt }
+}
+
+// MARK: - Trading Economics エラー（よくある形式）
+struct TEApiError: Codable {
+    let error: String?
+    let message: String?
 }

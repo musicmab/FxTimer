@@ -1,5 +1,6 @@
 import SwiftUI
 
+// MARK: - お知らせ編集画面
 struct ReminderEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -7,30 +8,54 @@ struct ReminderEditorView: View {
     let onSave: (ReminderItem) -> Void
     let onDelete: (() -> Void)?
 
-    @State private var selectedRuleType: RuleType = .daily
-    @State private var oneTimeDate: Date = Date()
-    @State private var weeklyDays: Set<Int> = [2,3,4,5,6]
-    @State private var monthlyDay: Int = 1
-    @State private var nth: Int = 1
-    @State private var nthWeekday: Int = 6
-    @State private var biweeklyAnchor: Date = Date()
+    // ルール編集用UI状態
+    private enum RuleKind: String, CaseIterable, Identifiable {
+        case daily
+        case weekly
+        case monthlyDay
+        case monthlyNth
+        case monthlyLast
+        case once
 
-    enum RuleType: String, CaseIterable, Identifiable {
-        case oneTime = "1回"
-        case daily = "毎日"
-        case weekly = "毎週(曜日)"
-        case biweekly = "隔週(曜日)"
-        case monthlyDay = "毎月(日付)"
-        case monthlyNthWeekday = "毎月(第n曜日)"
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .daily:      return "毎日"
+            case .weekly:     return "毎週 / 隔週"
+            case .monthlyDay: return "毎月（○日）"
+            case .monthlyNth: return "毎月（第n曜日）"
+            case .monthlyLast:return "毎月（最終○曜）"
+            case .once:       return "1回のみ（日時）"
+            }
+        }
     }
 
+    @State private var kind: RuleKind = .daily
+
+    // weekly
+    @State private var weeklyIntervalWeeks: Int = 1 // 1=毎週,2=隔週
+    @State private var weeklyWeekdays: Set<Int> = [2,3,4,5,6] // デフォルト平日（月〜金）
+
+    // monthlyDay
+    @State private var monthlyDaysText: String = "1" // "1,15,30" 形式
+
+    // monthlyNth / monthlyLast
+    @State private var nthWeekday: Int = 6 // 金
+    @State private var nth: Int = 1        // 第1
+    @State private var lastWeekday: Int = 6
+
+    // once
+    @State private var onceDate: Date = Date()
+
+    // 時刻編集（hour/minute）
     private var timeBinding: Binding<Date> {
         Binding<Date>(
             get: {
                 var comp = Calendar.current.dateComponents([.year, .month, .day], from: Date())
                 comp.hour = item.hour
                 comp.minute = item.minute
+                comp.second = 0
                 return Calendar.current.date(from: comp) ?? Date()
             },
             set: { newDate in
@@ -44,29 +69,27 @@ struct ReminderEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("基本") {
+                Section("お知らせ内容") {
                     Toggle("有効", isOn: $item.enabled)
                     DatePicker("時刻", selection: timeBinding, displayedComponents: [.hourAndMinute])
                     TextField("内容", text: $item.text, axis: .vertical)
                         .lineLimit(1...4)
-                }
 
-                Section("繰り返しルール") {
-                    Picker("種別", selection: $selectedRuleType) {
-                        ForEach(RuleType.allCases) { t in
-                            Text(t.rawValue).tag(t)
-                        }
-                    }
-
-                    ruleEditor()
-                }
-
-                if item.source == "te" {
-                    Section {
+                    if item.source == "te" {
                         Text("※ Trading Economics から自動生成された項目です。")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                }
+
+                Section("繰り返し") {
+                    Picker("種類", selection: $kind) {
+                        ForEach(RuleKind.allCases) { k in
+                            Text(k.title).tag(k)
+                        }
+                    }
+
+                    ruleDetailEditor
                 }
 
                 if let onDelete {
@@ -74,7 +97,9 @@ struct ReminderEditorView: View {
                         Button(role: .destructive) {
                             onDelete()
                             dismiss()
-                        } label: { Text("削除") }
+                        } label: {
+                            Text("削除")
+                        }
                     }
                 }
             }
@@ -85,151 +110,199 @@ struct ReminderEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        item.rule = buildRuleFromUI()
+                        applyUIToRule()
                         onSave(item)
                         dismiss()
                     }
                 }
             }
-            .onAppear { bootstrapUIFromItem() }
+            .onAppear {
+                loadRuleToUI()
+            }
         }
     }
 
+    // MARK: - ルール詳細UI
     @ViewBuilder
-    private func ruleEditor() -> some View {
-        switch selectedRuleType {
-        case .oneTime:
-            DatePicker("日付", selection: $oneTimeDate, displayedComponents: [.date])
-
+    private var ruleDetailEditor: some View {
+        switch kind {
         case .daily:
-            EmptyView()
+            Text("毎日、指定した時刻に通知します。")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
         case .weekly:
-            weekdayPicker(title: "曜日", selection: $weeklyDays)
+            Stepper(value: $weeklyIntervalWeeks, in: 1...4, step: 1) {
+                Text(weeklyIntervalWeeks == 1 ? "毎週" : "隔週（\(weeklyIntervalWeeks)週ごと）")
+            }
 
-        case .biweekly:
-            weekdayPicker(title: "曜日", selection: $weeklyDays)
-            DatePicker("基準日（この週を基準）", selection: $biweeklyAnchor, displayedComponents: [.date])
-                .font(.subheadline)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("曜日").font(.caption).foregroundColor(.secondary)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 7), spacing: 8) {
+                    ForEach(1...7, id: \.self) { wd in
+                        let selected = weeklyWeekdays.contains(wd)
+                        Button {
+                            if selected { weeklyWeekdays.remove(wd) } else { weeklyWeekdays.insert(wd) }
+                        } label: {
+                            Text(weekdayShort(wd))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(selected ? Color.blue.opacity(0.2) : Color.secondary.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Text("※ 曜日が未選択の場合は保存時に「月〜金」を自動設定します。")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 4)
 
         case .monthlyDay:
-            Stepper(value: $monthlyDay, in: 1...31) {
-                Text("日付: \(monthlyDay)日")
-            }
+            TextField("日付（例: 1,15,30）", text: $monthlyDaysText)
+                .keyboardType(.numbersAndPunctuation)
+            Text("※ 1〜31 をカンマ区切りで指定できます。存在しない日（2/30など）は自動でスキップされます。")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
-        case .monthlyNthWeekday:
-            Picker("第n", selection: $nth) {
-                Text("第1").tag(1)
-                Text("第2").tag(2)
-                Text("第3").tag(3)
-                Text("第4").tag(4)
-                Text("最終").tag(-1)
-            }
+        case .monthlyNth:
             Picker("曜日", selection: $nthWeekday) {
-                Text("日").tag(1)
-                Text("月").tag(2)
-                Text("火").tag(3)
-                Text("水").tag(4)
-                Text("木").tag(5)
-                Text("金").tag(6)
-                Text("土").tag(7)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func weekdayPicker(title: String, selection: Binding<Set<Int>>) -> some View {
-        let days: [(Int, String)] = [
-            (1, "日"), (2, "月"), (3, "火"), (4, "水"), (5, "木"), (6, "金"), (7, "土")
-        ]
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.subheadline)
-            HStack {
-                ForEach(days, id: \.0) { d in
-                    let isOn = selection.wrappedValue.contains(d.0)
-                    Button {
-                        if isOn {
-                            selection.wrappedValue.remove(d.0)
-                        } else {
-                            selection.wrappedValue.insert(d.0)
-                        }
-                    } label: {
-                        Text(d.1)
-                            .frame(width: 36, height: 30)
-                            .background(isOn ? Color.green.opacity(0.25) : Color.gray.opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
+                ForEach(1...7, id: \.self) { wd in
+                    Text(weekdayLong(wd)).tag(wd)
                 }
             }
+            Picker("第n", selection: $nth) {
+                ForEach(1...4, id: \.self) { n in
+                    Text("第\(n)").tag(n)
+                }
+            }
+            Text("例：第1金曜、第3水曜など。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+        case .monthlyLast:
+            Picker("曜日", selection: $lastWeekday) {
+                ForEach(1...7, id: \.self) { wd in
+                    Text(weekdayLong(wd)).tag(wd)
+                }
+            }
+            Text("例：最終金曜など。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+        case .once:
+            DatePicker("日時", selection: $onceDate, displayedComponents: [.date, .hourAndMinute])
+            Text("※ 1回のみの通知用です（自動取り込みで使います）。")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
-        .padding(.vertical, 4)
     }
 
-    private func bootstrapUIFromItem() {
+    // MARK: - UI <-> Rule 変換
+    private func loadRuleToUI() {
         switch item.rule {
-        case .oneTime(let y, let m, let d):
-            selectedRuleType = .oneTime
-            var comp = DateComponents()
-            comp.year = y; comp.month = m; comp.day = d
-            oneTimeDate = Calendar.current.date(from: comp) ?? Date()
         case .daily:
-            selectedRuleType = .daily
-        case .weekly(let wds):
-            selectedRuleType = .weekly
-            weeklyDays = Set(wds)
-        case .biweekly(let wds, let anchorISO):
-            selectedRuleType = .biweekly
-            weeklyDays = Set(wds)
-            biweeklyAnchor = parseYYYYMMDD(anchorISO) ?? Date()
-        case .monthlyDay(let d):
-            selectedRuleType = .monthlyDay
-            monthlyDay = d
-        case .monthlyNthWeekday(let n, let wd):
-            selectedRuleType = .monthlyNthWeekday
-            nth = n
-            nthWeekday = wd
+            kind = .daily
+
+        case .weekly(let weekdays, let intervalWeeks):
+            kind = .weekly
+            weeklyIntervalWeeks = max(1, intervalWeeks)
+            weeklyWeekdays = Set(weekdays.filter { 1...7 ~= $0 })
+            if weeklyWeekdays.isEmpty { weeklyWeekdays = [2,3,4,5,6] }
+
+        case .monthlyDay(let days):
+            kind = .monthlyDay
+            let clean = days.filter { 1...31 ~= $0 }.sorted()
+            monthlyDaysText = clean.isEmpty ? "1" : clean.map(String.init).joined(separator: ",")
+
+        case .monthlyNth(let weekday, let nth):
+            kind = .monthlyNth
+            nthWeekday = (1...7 ~= weekday) ? weekday : 6
+            self.nth = min(max(nth, 1), 4)
+
+        case .monthlyLast(let weekday):
+            kind = .monthlyLast
+            lastWeekday = (1...7 ~= weekday) ? weekday : 6
+
+        case .once(let iso):
+            kind = .once
+            onceDate = parseISO(iso) ?? Date()
         }
     }
 
-    private func buildRuleFromUI() -> ReminderRule {
-        switch selectedRuleType {
-        case .oneTime:
-            let cal = Calendar.current
-            let y = cal.component(.year, from: oneTimeDate)
-            let m = cal.component(.month, from: oneTimeDate)
-            let d = cal.component(.day, from: oneTimeDate)
-            return .oneTime(year: y, month: m, day: d)
-
+    private func applyUIToRule() {
+        switch kind {
         case .daily:
-            return .daily
+            item.rule = .daily
 
         case .weekly:
-            return .weekly(weekdays: weeklyDays.sorted())
-
-        case .biweekly:
-            let anchor = formatYYYYMMDD(biweeklyAnchor)
-            return .biweekly(weekdays: weeklyDays.sorted(), anchorISODate: anchor)
+            var wds = Array(weeklyWeekdays).sorted()
+            if wds.isEmpty { wds = [2,3,4,5,6] }
+            item.rule = .weekly(weekdays: wds, intervalWeeks: max(1, weeklyIntervalWeeks))
 
         case .monthlyDay:
-            return .monthlyDay(day: monthlyDay)
+            let days = parseDays(monthlyDaysText)
+            item.rule = .monthlyDay(days: days.isEmpty ? [1] : days)
 
-        case .monthlyNthWeekday:
-            return .monthlyNthWeekday(nth: nth, weekday: nthWeekday)
+        case .monthlyNth:
+            item.rule = .monthlyNth(weekday: nthWeekday, nth: nth)
+
+        case .monthlyLast:
+            item.rule = .monthlyLast(weekday: lastWeekday)
+
+        case .once:
+            item.rule = .once(dateISO: isoString(onceDate))
         }
     }
 
-    private func formatYYYYMMDD(_ date: Date) -> String {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "yyyy-MM-dd"
-        return df.string(from: date)
+    // MARK: - helpers
+    private func parseDays(_ text: String) -> [Int] {
+        let parts = text
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
+        let nums = parts.compactMap { Int($0) }.filter { 1...31 ~= $0 }
+        return Array(Set(nums)).sorted()
     }
 
-    private func parseYYYYMMDD(_ s: String) -> Date? {
+    private func weekdayShort(_ w: Int) -> String {
+        switch w {
+        case 1: return "日"
+        case 2: return "月"
+        case 3: return "火"
+        case 4: return "水"
+        case 5: return "木"
+        case 6: return "金"
+        case 7: return "土"
+        default: return "?"
+        }
+    }
+
+    private func weekdayLong(_ w: Int) -> String {
+        "（" + weekdayShort(w) + "）"
+    }
+
+    private func isoString(_ d: Date) -> String {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        iso.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        return iso.string(from: d)
+    }
+
+    private func parseISO(_ s: String) -> Date? {
+        let isoA = ISO8601DateFormatter()
+        isoA.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = isoA.date(from: s) { return d }
+
+        let isoB = ISO8601DateFormatter()
+        isoB.formatOptions = [.withInternetDateTime]
+        if let d = isoB.date(from: s) { return d }
+
+        // TZなしISO→JST扱い
         let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "yyyy-MM-dd"
+        df.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         return df.date(from: s)
     }
 }

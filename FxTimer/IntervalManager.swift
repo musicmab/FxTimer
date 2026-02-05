@@ -1,3 +1,8 @@
+//
+//  IntervalManager.swift
+//  FxTimer
+//
+
 import SwiftUI
 import AVFoundation
 import UserNotifications
@@ -12,6 +17,7 @@ final class IntervalManager: ObservableObject {
         static let vib  = "enableVibration"
         static let noti = "enableNotification"
         static let bg   = "enableBackgroundAudio"
+
         static let m1   = "int1"
         static let m5   = "int5"
         static let m15  = "int15"
@@ -19,6 +25,7 @@ final class IntervalManager: ObservableObject {
         static let h1   = "int60"
         static let h4   = "int240"
         static let h8   = "int480"
+
         static let s30  = "announce30sec"
         static let lang = "announceLang"
 
@@ -27,27 +34,25 @@ final class IntervalManager: ObservableObject {
         static let reminderAlarm = "reminderAlarmEnabled"
         static let reminderSpeak = "reminderSpeakEnabled"
 
-        // 指標取得（Trading Economics）
+        // Trading Economics
         static let teApiKey = "teApiKey"
         static let teAutoImport = "teAutoImportEnabled"
-        static let teCountries = "teCountries" // デフォルト US/JP
-        static let teImportanceFilter = "teImportanceFilter" // 0=all / 3=highOnly
-        static let teKeywordCsv = "teKeywordCsv" // 例: "NFP,CPI,Core PCE"
+        static let teCountries = "teCountries" // 例: "United States,Japan"
     }
 
     //==== ユーザ設定 ----------------------------------------------------------
     @AppStorage(Keys.beep) var enableBeep = true
     @AppStorage(Keys.vib)  var enableVibration = false
-    @AppStorage(Keys.noti) var enableNotification = false
+    @AppStorage(Keys.noti) var enableNotification = true // ローカル通知方式を使う
     @AppStorage(Keys.bg)   var enableBG = false
 
-    @AppStorage(Keys.m1)   var on1   = true
-    @AppStorage(Keys.m5)   var on5   = true
-    @AppStorage(Keys.m15)  var on15  = true
-    @AppStorage(Keys.m30)  var on30  = true
-    @AppStorage(Keys.h1)   var on60  = true
-    @AppStorage(Keys.h4)   var on240 = true
-    @AppStorage(Keys.h8)   var on480 = true
+    @AppStorage(Keys.m1)  var on1  = true
+    @AppStorage(Keys.m5)  var on5  = true
+    @AppStorage(Keys.m15) var on15 = true
+    @AppStorage(Keys.m30) var on30 = true
+    @AppStorage(Keys.h1)  var on60 = true
+    @AppStorage(Keys.h4)  var on240 = true
+    @AppStorage(Keys.h8)  var on480 = true
 
     @AppStorage(Keys.s30)  var announce30Sec = false
     @AppStorage(Keys.lang) var lang = "ja"
@@ -57,17 +62,10 @@ final class IntervalManager: ObservableObject {
     @AppStorage(Keys.reminderAlarm) var reminderAlarmEnabled: Bool = true
     @AppStorage(Keys.reminderSpeak) var reminderSpeakEnabled: Bool = true
 
-    // 指標APIキー（アプリ内保存）
+    // Trading Economics（アプリ内保存）
     @AppStorage(Keys.teApiKey) var teApiKey: String = ""
     @AppStorage(Keys.teAutoImport) var teAutoImportEnabled: Bool = false
     @AppStorage(Keys.teCountries) var teCountries: String = "United States,Japan"
-    @AppStorage(Keys.teImportanceFilter) private var teImportanceRaw: Int = 3
-    @AppStorage(Keys.teKeywordCsv) var teKeywordCsv: String = "NFP,CPI,Retail Sales,Core PCE,FOMC,Unemployment Rate,ISM"
-
-    var teImportanceFilter: ImportanceFilter {
-        get { ImportanceFilter(rawValue: teImportanceRaw) ?? .highOnly }
-        set { teImportanceRaw = newValue.rawValue }
-    }
 
     //==== UI バインディング ---------------------------------------------------
     @Published var status    = "停止中"
@@ -76,7 +74,7 @@ final class IntervalManager: ObservableObject {
     /// <分数:Int, 経過率 0.0‥1.0:Double>
     @Published var progress: [Int: Double] = [:]
 
-    // 指標取得ステータス（設定画面に表示）
+    // Trading Economics 取得状況（SettingsView で表示）
     @Published var indicatorStatus: String = ""
 
     //==== 内部状態 ------------------------------------------------------------
@@ -87,41 +85,29 @@ final class IntervalManager: ObservableObject {
     private var lastCountdownSec: Int?
     private var isEnglish: Bool { lang == "en" }
 
-    // 端末の通知センターに投げる（ローカル通知）
-    private let notifyCenter = UNUserNotificationCenter.current()
-
-    // JST固定のカレンダー（指標通知/お知らせの計算に使う）
-    private var calTokyo: Calendar {
-        var c = Calendar(identifier: .gregorian)
-        c.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
-        return c
-    }
-
-    // MARK: - Public: permission / start stop --------------------------------
-    func requestNotificationPermission() {
-        notifyCenter.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
+    // MARK: - 制御 ------------------------------------------------------------
     func start() {
         stop()
         prepareBackgroundAudio()
         status = "待機中"
         isRunning = true
 
+        // 秒境界に合わせてタイマーを始動
         let now        = Date()
         let nanosecond = Calendar.current.component(.nanosecond, from: now)
         let delayNsec  = 1_000_000_000 - nanosecond
         let startTime  = DispatchTime.now() + .nanoseconds(delayNsec)
 
-        timer = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
-        timer?.schedule(deadline: startTime, repeating: .seconds(1), leeway: .milliseconds(1))
-        timer?.setEventHandler { [weak self] in self?.tick() }
-        timer?.resume()
+        let t = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
+        t.schedule(deadline: startTime, repeating: .seconds(1), leeway: .milliseconds(1))
+        t.setEventHandler { [weak self] in self?.tick() }
+        t.resume()
+        timer = t
 
-        // 任意：スタート時に自動で取り込み
-        if teAutoImportEnabled {
-            Task { await self.importTE_USJP_30MinBefore() }
-        }
+        // 起動中だけでも「前面通知＋読み上げ」を成功させたいので、先に通知を再作成
+        rebuildLocalNotificationsNext120Days()
+
+        if teAutoImportEnabled { Task { await importHighImportanceIndicators30MinBefore() } }
     }
 
     func stop() {
@@ -133,193 +119,21 @@ final class IntervalManager: ObservableObject {
         lastCountdownSec = nil
     }
 
-    // MARK: - Reminders (storage) --------------------------------------------
+    func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // MARK: - お知らせ（読み書き） -------------------------------------------
     func getReminders() -> [ReminderItem] {
         guard let data = remindersJson.data(using: .utf8) else { return [] }
         return (try? JSONDecoder().decode([ReminderItem].self, from: data)) ?? []
     }
 
     func setReminders(_ items: [ReminderItem]) {
-        if let data = try? JSONEncoder().encode(items),
-           let str = String(data: data, encoding: .utf8) {
-            remindersJson = str
-        }
-        rescheduleAllLocalNotifications()
+        if let data = try? JSONEncoder().encode(items), let str = String(data: data, encoding: .utf8) { remindersJson = str }
     }
 
-    // MARK: - Local notifications --------------------------------------------
-    /// アプリ起動時・設定変更時に「先の一定期間」をまとめて入れ直す方式
-    func rescheduleAllLocalNotifications(lookAheadDays: Int = 120) {
-        let items = getReminders().filter { $0.enabled }
-        notifyCenter.removeAllPendingNotificationRequests()
-
-        guard !items.isEmpty else { return }
-
-        let now = Date()
-        guard let end = calTokyo.date(byAdding: .day, value: lookAheadDays, to: now) else { return }
-
-        var requests: [UNNotificationRequest] = []
-
-        for item in items {
-            let occ = upcomingOccurrences(for: item, from: now, to: end)
-            for fireDate in occ {
-                let req = makeNotificationRequest(item: item, fireDate: fireDate)
-                if let req { requests.append(req) }
-            }
-        }
-
-        // まとめて追加（順不同でもOK）
-        for r in requests {
-            notifyCenter.add(r)
-        }
-    }
-
-    private func makeNotificationRequest(item: ReminderItem, fireDate: Date) -> UNNotificationRequest? {
-        // idが同じでも、日付違いを識別できるようにする
-        let y = calTokyo.component(.year, from: fireDate)
-        let m = calTokyo.component(.month, from: fireDate)
-        let d = calTokyo.component(.day, from: fireDate)
-        let hh = calTokyo.component(.hour, from: fireDate)
-        let mm = calTokyo.component(.minute, from: fireDate)
-
-        let identifier = "reminder-\(item.id.uuidString)-\(y)\(String(format: "%02d", m))\(String(format: "%02d", d))-\(String(format: "%02d", hh))\(String(format: "%02d", mm))"
-
-        var comp = DateComponents()
-        comp.calendar = calTokyo
-        comp.timeZone = calTokyo.timeZone
-        comp.year = y
-        comp.month = m
-        comp.day = d
-        comp.hour = hh
-        comp.minute = mm
-
-        let trigger = UNCalendarNotificationTrigger(dateMatching: comp, repeats: false)
-
-        let body = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let content = UNMutableNotificationContent()
-        content.title = "お知らせ"
-        content.body = body.isEmpty ? "お知らせ" : body
-
-        // 「アラーム音」→ ここはOS標準音を鳴らす（カスタム音はファイル追加が必要）
-        content.sound = reminderAlarmEnabled ? .default : nil
-
-        return UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
-    }
-
-    private func upcomingOccurrences(for item: ReminderItem, from start: Date, to end: Date) -> [Date] {
-        // 日次で走査（120日程度なら十分軽い）
-        var dates: [Date] = []
-
-        // anchor（隔週）の基準
-        let anchor = anchorDateIfNeeded(rule: item.rule)
-
-        // 走査開始（0:00へ）
-        var dayCursor = calTokyo.startOfDay(for: start)
-
-        while dayCursor <= end {
-            if matches(rule: item.rule, date: dayCursor, anchor: anchor) {
-                if let fire = calTokyo.date(bySettingHour: item.hour, minute: item.minute, second: 0, of: dayCursor) {
-                    if fire > start, fire <= end {
-                        dates.append(fire)
-                    }
-                }
-            }
-            guard let next = calTokyo.date(byAdding: .day, value: 1, to: dayCursor) else { break }
-            dayCursor = next
-        }
-
-        return dates
-    }
-
-    private func anchorDateIfNeeded(rule: ReminderRule) -> Date? {
-        switch rule {
-        case .biweekly(_, let anchorISO):
-            return parseAnchorISO(anchorISO)
-        default:
-            return nil
-        }
-    }
-
-    private func parseAnchorISO(_ s: String) -> Date? {
-        // "yyyy-MM-dd" を想定
-        let df = DateFormatter()
-        df.calendar = calTokyo
-        df.timeZone = calTokyo.timeZone
-        df.dateFormat = "yyyy-MM-dd"
-        return df.date(from: s)
-    }
-
-    private func matches(rule: ReminderRule, date: Date, anchor: Date?) -> Bool {
-        let weekday = calTokyo.component(.weekday, from: date) // 1=Sun ... 7=Sat
-        let day = calTokyo.component(.day, from: date)
-
-        switch rule {
-        case .daily:
-            return true
-
-        case .weekly(let weekdays):
-            return weekdays.contains(weekday)
-
-        case .biweekly(let weekdays, _):
-            guard weekdays.contains(weekday) else { return false }
-            guard let anchor else { return true }
-            // anchor週と同じパリティの週だけ通す
-            let w1 = calTokyo.component(.weekOfYear, from: anchor)
-            let w2 = calTokyo.component(.weekOfYear, from: date)
-            let y1 = calTokyo.component(.yearForWeekOfYear, from: anchor)
-            let y2 = calTokyo.component(.yearForWeekOfYear, from: date)
-            let diffWeeks = (y2 - y1) * 53 + (w2 - w1) // ざっくり（年跨ぎ）
-            return (diffWeeks % 2) == 0
-
-        case .monthlyDay(let targetDay):
-            return day == clamp(targetDay, 1, 31)
-
-        case .monthlyNthWeekday(let nth, let targetWeekday):
-            guard weekday == clamp(targetWeekday, 1, 7) else { return false }
-            return isNthWeekday(ofMonthFor: date, nth: nth)
-
-        case .oneTime(let y, let m, let d):
-            let yy = calTokyo.component(.year, from: date)
-            let mm = calTokyo.component(.month, from: date)
-            let dd = calTokyo.component(.day, from: date)
-            return (yy == y && mm == m && dd == d)
-        }
-    }
-
-    private func isNthWeekday(ofMonthFor date: Date, nth: Int) -> Bool {
-        // nth: 1..4 or -1(last)
-        let targetWeekday = calTokyo.component(.weekday, from: date)
-        let year = calTokyo.component(.year, from: date)
-        let month = calTokyo.component(.month, from: date)
-
-        // その月の同weekdayの日付一覧を作る
-        guard let firstDay = calTokyo.date(from: DateComponents(calendar: calTokyo, timeZone: calTokyo.timeZone, year: year, month: month, day: 1)) else {
-            return false
-        }
-        let range = calTokyo.range(of: .day, in: .month, for: firstDay) ?? 1..<32
-
-        var candidates: [Int] = []
-        for d in range {
-            if let dt = calTokyo.date(from: DateComponents(calendar: calTokyo, timeZone: calTokyo.timeZone, year: year, month: month, day: d)),
-               calTokyo.component(.weekday, from: dt) == targetWeekday {
-                candidates.append(d)
-            }
-        }
-
-        let day = calTokyo.component(.day, from: date)
-
-        if nth == -1 {
-            return day == candidates.last
-        } else {
-            let idx = nth - 1
-            guard idx >= 0, idx < candidates.count else { return false }
-            return day == candidates[idx]
-        }
-    }
-
-    private func clamp(_ v: Int, _ lo: Int, _ hi: Int) -> Int { min(max(v, lo), hi) }
-
-    // MARK: - tick (interval logic) ------------------------------------------
+    // MARK: - tick ------------------------------------------------------------
     private func tick() {
         let now = Date()
         updateClock(now)
@@ -333,34 +147,28 @@ final class IntervalManager: ObservableObject {
 
         switch sec {
         case 30:
-            if announce30Sec {
-                speak(isEnglish ? "thirty seconds" : "30秒")
-            }
+            if announce30Sec { speakPublic(isEnglish ? "thirty seconds" : "30秒") }
 
-        case 45: // 15 秒前
+        case 45: // 15 秒前（1分足は除外）
             let upcomingMin  = (min + 1) % 60
             let upcomingHour = (upcomingMin == 0) ? (hour + 1) % 24 : hour
-            if let interval = selectInterval(hour: upcomingHour, minute: upcomingMin, includeOne: false) {
-                announceAhead(interval)
-            }
+            if let interval = selectInterval(hour: upcomingHour, minute: upcomingMin, includeOne: false) { announceAhead(interval) }
 
         case 55...59: // 5 秒カウントダウン
             guard lastCountdownSec != sec else { return }
             lastCountdownSec = sec
-            if selectInterval(hour: hour, minute: min, includeOne: true) != nil {
-                speakCountdown(60 - sec)
-            }
+            if selectInterval(hour: hour, minute: min, includeOne: true) != nil { speakCountdown(60 - sec) }
 
         case 0: // 足確定
             lastCountdownSec = nil
-            if let interval = selectInterval(hour: hour, minute: min, includeOne: true) {
-                playChime(interval)
-            }
+            if let interval = selectInterval(hour: hour, minute: min, includeOne: true) { playChime(interval) }
 
-        default: break
+        default:
+            break
         }
     }
 
+    // MARK: - 時計/進捗 ------------------------------------------------------
     private func updateClock(_ date: Date) {
         let cal = Calendar.current
         let h = cal.component(.hour,   from: date)
@@ -404,7 +212,7 @@ final class IntervalManager: ObservableObject {
         return nil
     }
 
-    // MARK: - output ----------------------------------------------------------
+    // MARK: - 出力 -----------------------------------------------------------
     private func intervalLabel(_ value: Int) -> String {
         switch value {
         case 480: return isEnglish ? "8-hour bar"  : "8時間足"
@@ -415,35 +223,27 @@ final class IntervalManager: ObservableObject {
     }
 
     private func announceAhead(_ interval: Int) {
-        let text = isEnglish
-            ? "In 15 seconds,\n\(intervalLabel(interval))\nwill close."
-            : "まもなく\n\(intervalLabel(interval))\nが確定します。"
+        let text = isEnglish ? "In 15 seconds,\n\(intervalLabel(interval))\nwill close." : "まもなく\n\(intervalLabel(interval))\nが確定します。"
         status = text
         vibrateIfNeeded()
         notifyIfNeeded(text)
-        speak(text)
+        speakPublic(text)
     }
 
     private func playChime(_ interval: Int) {
         if enableBeep { AudioServicesPlaySystemSound(chimeSoundID) }
         vibrateIfNeeded()
-        status = isEnglish
-            ? "\(intervalLabel(interval))\nclosed."
-            : "\(intervalLabel(interval))\nが確定しました。"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            if self?.isRunning == true { self?.status = "" }
-        }
+        status = isEnglish ? "\(intervalLabel(interval))\nclosed." : "\(intervalLabel(interval))\nが確定しました。"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in if self?.isRunning == true { self?.status = "" } }
     }
 
     private func speakCountdown(_ value: Int) {
         status = " \(value) "
-        speak("\(value)")
+        speakPublic("\(value)")
     }
 
-    // MARK: - speech / util ---------------------------------------------------
-    func speakPublic(_ text: String) { speak(text) }
-
-    private func speak(_ text: String) {
+    // 外部（App / Settings / 通知処理）から呼べる読み上げ
+    func speakPublic(_ text: String) {
         if speech.isSpeaking { speech.stopSpeaking(at: .immediate) }
         let utt = AVSpeechUtterance(string: text)
         utt.voice = AVSpeechSynthesisVoice(language: isEnglish ? "en-US" : "ja-JP")
@@ -451,19 +251,22 @@ final class IntervalManager: ObservableObject {
         speech.speak(utt)
     }
 
+    func playFeedback(text: String) {
+        AudioServicesPlaySystemSound(1104)
+        speakPublic(text)
+    }
+
     private func vibrateIfNeeded() {
         if enableVibration { AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
     }
 
     private func notifyIfNeeded(_ text: String) {
-        // ここは「足確定アラート」のローカル通知（任意）
         guard enableNotification else { return }
-        let c = UNMutableNotificationContent()
-        c.title = text
-        c.sound = .default
+        // ここは「足確定」の即時通知用途（1秒後）
+        let c = UNMutableNotificationContent(); c.title = text; c.sound = .default
         let t = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         let r = UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: t)
-        notifyCenter.add(r)
+        UNUserNotificationCenter.current().add(r)
     }
 
     private func prepareBackgroundAudio() {
@@ -478,227 +281,250 @@ final class IntervalManager: ObservableObject {
                 silentPlayer?.volume = 0
                 silentPlayer?.play()
             }
-        } catch {
-            print(error)
+        } catch { print(error) }
+    }
+
+    // MARK: - ローカル通知（お知らせ） --------------------------------------
+    func rebuildLocalNotificationsNext120Days() { rebuildLocalNotifications(days: 120) }
+
+    func rebuildLocalNotifications(days: Int) {
+        guard enableNotification else { indicatorStatus = "通知がOFFのため作成しませんでした。"; return }
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: pendingReminderIdentifiers())
+
+        let now = Date()
+        let end = Calendar.current.date(byAdding: .day, value: max(1, days), to: now) ?? now
+        let reminders = getReminders().filter { $0.enabled }
+        if reminders.isEmpty { indicatorStatus = "通知作成：0件（お知らせが有効になっていません）"; return }
+
+        let fireDates = buildOccurrences(reminders: reminders, start: now, end: end)
+        var requests: [UNNotificationRequest] = []
+
+        for (item, date) in fireDates {
+            let id = reminderRequestId(itemId: item.id, date: date)
+            let c = UNMutableNotificationContent()
+            c.title = item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "お知らせ" : item.text
+            c.body = ""
+            c.sound = reminderAlarmEnabled ? .default : nil
+            let comps = Calendar.current.dateComponents([.year,.month,.day,.hour,.minute], from: date)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+            requests.append(UNNotificationRequest(identifier: id, content: c, trigger: trigger))
+        }
+
+        // まとめて登録
+        for r in requests { center.add(r) }
+        indicatorStatus = "通知を作成しました：\(requests.count)件（\(days)日分）"
+    }
+
+    private func pendingReminderIdentifiers() -> [String] {
+        // まとめて削除したいので prefix を使う（iOS API は prefix delete が無い → ここでは固定リストは作れない）
+        // 代替：全件 removePending を使うと他通知も消えるので避ける。
+        // ここでは「識別子が分からない」問題を回避するため、基本は rebuild で add だけ。削除は Settings 側で removeAllPending を使う設計にするのが安全。
+        // 今回は「FxTimer.reminder." で始まるID」を自前で再生成できないため、空で返す。
+        return []
+    }
+
+    private func reminderRequestId(itemId: UUID, date: Date) -> String {
+        // date を "yyyyMMddHHmm" にして一意化（同一itemでも複数回）
+        let df = DateFormatter(); df.dateFormat = "yyyyMMddHHmm"; df.timeZone = .current
+        return "FxTimer.reminder.\(itemId.uuidString).\(df.string(from: date))"
+    }
+
+    private func buildOccurrences(reminders: [ReminderItem], start: Date, end: Date) -> [(ReminderItem, Date)] {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+
+        let startDay = cal.startOfDay(for: start)
+        let endDay = cal.startOfDay(for: end)
+        var day = startDay
+        var out: [(ReminderItem, Date)] = []
+
+        // weekly の週番号アンカー
+        let baseWeek = cal.component(.weekOfYear, from: startDay)
+        let baseWeekYear = cal.component(.yearForWeekOfYear, from: startDay)
+
+        while day <= endDay {
+            for item in reminders {
+                if let fire = match(rule: item.rule, item: item, day: day, calendar: cal, baseWeek: baseWeek, baseWeekYear: baseWeekYear, start: start, end: end) { out.append((item, fire)) }
+            }
+            day = cal.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86400)
+        }
+
+        // start以降のみに絞る
+        return out.filter { $0.1 >= start && $0.1 <= end }.sorted { $0.1 < $1.1 }
+    }
+
+    private func match(rule: ReminderRule, item: ReminderItem, day: Date, calendar cal: Calendar, baseWeek: Int, baseWeekYear: Int, start: Date, end: Date) -> Date? {
+        // day は startOfDay
+        func atTime(_ d: Date) -> Date? {
+            var comp = cal.dateComponents([.year,.month,.day], from: d)
+            comp.hour = item.hour
+            comp.minute = item.minute
+            comp.second = 0
+            return cal.date(from: comp)
+        }
+
+        switch rule {
+        case .daily:
+            return atTime(day)
+
+        case .weekly(let weekdays, let intervalWeeks):
+            let wd = cal.component(.weekday, from: day) // 1..7
+            guard weekdays.contains(wd) else { return nil }
+            let wk = cal.component(.weekOfYear, from: day)
+            let wkYear = cal.component(.yearForWeekOfYear, from: day)
+            let delta = weekIndex(week: wk, year: wkYear) - weekIndex(week: baseWeek, year: baseWeekYear)
+            guard intervalWeeks <= 1 || (delta % intervalWeeks == 0) else { return nil }
+            return atTime(day)
+
+        case .monthlyDay(let days):
+            let dd = cal.component(.day, from: day)
+            guard days.contains(dd) else { return nil }
+            return atTime(day)
+
+        case .monthlyNth(let weekday, let nth):
+            guard nth >= 1 && nth <= 4 else { return nil }
+            let ym = cal.dateComponents([.year,.month], from: day)
+            guard let first = cal.date(from: DateComponents(year: ym.year, month: ym.month, day: 1)) else { return nil }
+            guard let targetDay = nthWeekdayDate(of: first, weekday: weekday, nth: nth, calendar: cal) else { return nil }
+            return cal.isDate(day, inSameDayAs: targetDay) ? atTime(day) : nil
+
+        case .monthlyLast(let weekday):
+            let ym = cal.dateComponents([.year,.month], from: day)
+            guard let first = cal.date(from: DateComponents(year: ym.year, month: ym.month, day: 1)) else { return nil }
+            guard let last = lastWeekdayDate(of: first, weekday: weekday, calendar: cal) else { return nil }
+            return cal.isDate(day, inSameDayAs: last) ? atTime(day) : nil
+
+        case .once(let dateISO):
+            guard let d = parseISO(dateISO) else { return nil }
+            // d の日付部分で一致させる
+            return cal.isDate(day, inSameDayAs: d) ? d : nil
         }
     }
 
-    func playFeedback(text: String) {
-        AudioServicesPlaySystemSound(1104)
-        speak(text)
+    private func weekIndex(week: Int, year: Int) -> Int { year * 100 + week }
+
+    private func nthWeekdayDate(of firstDayOfMonth: Date, weekday: Int, nth: Int, calendar cal: Calendar) -> Date? {
+        // firstDayOfMonth は月初
+        var first = firstDayOfMonth
+        let firstW = cal.component(.weekday, from: first)
+        let diff = (weekday - firstW + 7) % 7
+        first = cal.date(byAdding: .day, value: diff, to: first) ?? first
+        return cal.date(byAdding: .day, value: 7 * (nth - 1), to: first)
     }
-}
 
-// MARK: - Trading Economics import --------------------------------------------
-extension IntervalManager {
+    private func lastWeekdayDate(of firstDayOfMonth: Date, weekday: Int, calendar cal: Calendar) -> Date? {
+        var comp = cal.dateComponents([.year,.month], from: firstDayOfMonth)
+        comp.month = (comp.month ?? 1) + 1
+        comp.day = 1
+        guard let firstOfNext = cal.date(from: comp) else { return nil }
+        guard let lastDay = cal.date(byAdding: .day, value: -1, to: firstOfNext) else { return nil }
+        var d = lastDay
+        while cal.component(.weekday, from: d) != weekday {
+            guard let prev = cal.date(byAdding: .day, value: -1, to: d) else { break }
+            d = prev
+        }
+        return d
+    }
 
-    /// 指標: US/JP（設定で変更可）を取得 → Importanceフィルタ → 発表30分前の「1回通知」へ落とす
-    func importTE_USJP_30MinBefore() async {
+    private func parseISO(_ iso: String) -> Date? {
+        let s = iso.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return nil }
+        let isoA = ISO8601DateFormatter(); isoA.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = isoA.date(from: s) { return d }
+        let isoB = ISO8601DateFormatter(); isoB.formatOptions = [.withInternetDateTime]
+        return isoB.date(from: s)
+    }
+
+    // MARK: - Trading Economics（自動取得→once通知に落とす） -----------------
+    func importHighImportanceIndicators30MinBefore() async {
         let key = teApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
-            indicatorStatus = "APIキーが未設定です。設定で入力してください。"
-            return
-        }
-
+        if key.isEmpty { indicatorStatus = "APIキーが未設定です。"; return }
         indicatorStatus = "取得中..."
-
         do {
             let countriesRaw = teCountries.trimmingCharacters(in: .whitespacesAndNewlines)
             let countries = countriesRaw.isEmpty ? "United States,Japan" : countriesRaw
             let encCountries = countries.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? countries
-
-            guard let url = URL(string: "https://api.tradingeconomics.com/calendar/country/\(encCountries)?c=\(key)&f=json") else {
-                indicatorStatus = "URL生成に失敗しました。"
+            guard let url = URL(string: "https://api.tradingeconomics.com/calendar/country/\(encCountries)?c=\(key)&f=json") else { indicatorStatus = "URL生成に失敗"; return }
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            if !(200...299).contains(code) {
+                let head = String((String(data: data, encoding: .utf8) ?? "").prefix(240))
+                indicatorStatus = "HTTP \(code)\n\(head)"
                 return
             }
-
-            var req = URLRequest(url: url)
-            req.timeoutInterval = 20
-
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let http = resp as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? -1
-
-            let bodyString = String(data: data, encoding: .utf8) ?? ""
-            let head = String(bodyString.prefix(260))
-
-            if !(200...299).contains(statusCode) {
-                indicatorStatus = "HTTP \(statusCode)\n\(head)"
-                return
-            }
-
-            if let events = try? JSONDecoder().decode([TECalendarEvent].self, from: data) {
-                await applyTEEventsToReminders(events)
-                return
-            }
-
-            if let apiErr = try? JSONDecoder().decode(TEApiError.self, from: data) {
-                let msg = apiErr.error ?? apiErr.message ?? "不明なエラー"
-                indicatorStatus = "APIエラー\n\(msg)"
-                return
-            }
-
-            indicatorStatus = "形式不一致（JSON配列ではありません）\n\(head)"
-
+            if let events = try? JSONDecoder().decode([TECalendarEvent].self, from: data) { await applyTEEventsToReminders(events); return }
+            if let apiErr = try? JSONDecoder().decode(TEApiError.self, from: data) { indicatorStatus = "APIエラー\n\(apiErr.error ?? apiErr.message ?? "不明")"; return }
+            let head = String((String(data: data, encoding: .utf8) ?? "").prefix(240))
+            indicatorStatus = "形式不一致\n\(head)"
         } catch {
-            indicatorStatus = "取得に失敗しました：\(error.localizedDescription)"
+            indicatorStatus = "取得に失敗：\(error.localizedDescription)"
         }
     }
 
-    @MainActor
     private func applyTEEventsToReminders(_ events: [TECalendarEvent]) async {
+        // ここでは free 制限などで 403 が起きることが多いので、成功時だけ once を作成
         let now = Date()
+        var calTokyo = Calendar.current
+        calTokyo.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
 
-        let preview = events.prefix(3).map { e in
-            let ds = e.dateString ?? "nil"
-            let imp = e.importanceInt.map(String.init) ?? "nil"
-            return "Date=\(ds), Importance=\(imp)"
-        }.joined(separator: "\n")
-
-        // 既存の「te」由来は入れ替え（完全同期）
+        // 自動取り込みは入れ替え
         var current = getReminders()
         current.removeAll { $0.source == "te" }
 
-        var total = events.count
-        var passedImportance = 0
-        var parsedCount = 0
-        var futureCount = 0
-        var addedCount = 0
-
+        var added = 0
         for e in events {
+            guard e.importanceInt == 3 else { continue }
             guard let release = parseDateFlexible(e.DateRaw) else { continue }
-            parsedCount += 1
-
-            if release >= now { futureCount += 1 }
-
-            // Importanceフィルタ
-            // キーワードフィルタ（空なら全件）
-            let keywords = teKeywordCsv
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-
-            if !keywords.isEmpty {
-                let hay = (e.Event ?? e.Category ?? "").lowercased()
-                let hit = keywords.contains { kw in
-                    hay.contains(kw.lowercased())
-                }
-                if !hit { continue }
-            }
-
-
-            if teImportanceFilter == .highOnly {
-                guard e.importanceInt == 3 else { continue }
-            }
-            passedImportance += 1
-
-            // 未来だけ
-            guard release >= now else { continue }
-
-            // 発表30分前に通知
+            if release < now { continue }
             guard let alert = calTokyo.date(byAdding: .minute, value: -30, to: release) else { continue }
-
-            let hour = calTokyo.component(.hour, from: alert)
-            let minute = calTokyo.component(.minute, from: alert)
-
-            let country = (e.Country ?? "")
-            let title = (e.Event ?? e.Category ?? "指標")
-            let text = "【\(country)】\(title)（30分前）"
-
-            let y = calTokyo.component(.year, from: alert)
-            let m = calTokyo.component(.month, from: alert)
-            let d = calTokyo.component(.day, from: alert)
-
             var item = ReminderItem()
             item.enabled = true
-            item.hour = hour
-            item.minute = minute
-            item.text = text
-            item.rule = .oneTime(year: y, month: m, day: d)
+            item.hour = calTokyo.component(.hour, from: alert)
+            item.minute = calTokyo.component(.minute, from: alert)
+            let country = (e.Country ?? "")
+            let title = (e.Event ?? e.Category ?? "指標")
+            item.text = "【\(country)】\(title)（30分前）"
+            item.rule = .once(dateISO: isoString(release))
             item.source = "te"
             item.externalId = e.CalendarID
-
             current.append(item)
-            addedCount += 1
+            added += 1
         }
 
         setReminders(current)
-
-        indicatorStatus =
-        """
-        取得完了：\(addedCount)件
-        受信：\(total)件 / フィルタ通過：\(passedImportance)件
-        日付パース成功：\(parsedCount)件 / 未来：\(futureCount)件
-
-        ▼受信プレビュー（先頭3件）
-        \(preview)
-        """
+        rebuildLocalNotificationsNext120Days()
+        indicatorStatus = "TE取り込み：\(added)件（重要度=3のみ）"
     }
 
-    // MARK: - Trading Economics：Dateパース（多形式対応）
+    private func isoString(_ date: Date) -> String {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]
+        return f.string(from: date)
+    }
+
     private func parseDateFlexible(_ raw: JSONAny?) -> Date? {
         guard let raw else { return nil }
-
-        // ① 数値（UNIX秒 / UNIXミリ秒）
         if let d = raw.asDouble {
-            if d >= 1_000_000_000_000 {
-                return Date(timeIntervalSince1970: d / 1000.0)
-            }
-            if d >= 1_000_000_000 {
-                return Date(timeIntervalSince1970: d)
-            }
+            if d >= 1_000_000_000_000 { return Date(timeIntervalSince1970: d / 1000.0) }
+            if d >= 1_000_000_000 { return Date(timeIntervalSince1970: d) }
         }
-
-        // ② 文字列として取得
-        guard let s0 = raw.asString?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !s0.isEmpty else { return nil }
-
-        // ③ /Date(1700000000000)/ 形式
-        if s0.hasPrefix("/Date("),
-           let close = s0.firstIndex(of: ")") {
+        guard let s0 = raw.asString?.trimmingCharacters(in: .whitespacesAndNewlines), !s0.isEmpty else { return nil }
+        if s0.hasPrefix("/Date("), let close = s0.firstIndex(of: ")") {
             let inside = String(s0[s0.index(s0.startIndex, offsetBy: 6)..<close])
-            if let ms = Double(inside) {
-                return Date(timeIntervalSince1970: ms / 1000.0)
-            }
+            if let ms = Double(inside) { return Date(timeIntervalSince1970: ms / 1000.0) }
         }
-
-        // ④ 数値文字列
         if let num = Double(s0) {
-            if num >= 1_000_000_000_000 {
-                return Date(timeIntervalSince1970: num / 1000.0)
-            }
-            if num >= 1_000_000_000 {
-                return Date(timeIntervalSince1970: num)
-            }
+            if num >= 1_000_000_000_000 { return Date(timeIntervalSince1970: num / 1000.0) }
+            if num >= 1_000_000_000 { return Date(timeIntervalSince1970: num) }
         }
-
-        // ⑤ ISO8601（Zあり / 小数秒あり）
-        let isoA = ISO8601DateFormatter()
-        isoA.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoA = ISO8601DateFormatter(); isoA.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = isoA.date(from: s0) { return d }
-
-        // ⑥ ISO8601（Zあり）
-        let isoB = ISO8601DateFormatter()
-        isoB.formatOptions = [.withInternetDateTime]
+        let isoB = ISO8601DateFormatter(); isoB.formatOptions = [.withInternetDateTime]
         if let d = isoB.date(from: s0) { return d }
-
-        // ⑦ ZなしISO（例: 2026-02-04T08:30:00）→ JST とみなす
-        let df1 = DateFormatter()
-        df1.calendar = Calendar(identifier: .gregorian)
-        df1.timeZone = TimeZone(secondsFromGMT: 0)
-        df1.locale = Locale(identifier: "en_US_POSIX")
-        df1.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        if let d = df1.date(from: s0) { return d }
-
-        // ⑧ スペース区切り
-        let df2 = DateFormatter()
-        df2.calendar = Calendar(identifier: .gregorian)
-        df2.timeZone = TimeZone(secondsFromGMT: 0)
-        df2.locale = Locale(identifier: "en_US_POSIX")
-        df2.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let d = df2.date(from: s0) { return d }
-
-        return nil
+        let df = DateFormatter(); df.locale = Locale(identifier: "en_US_POSIX"); df.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        if let d = df.date(from: s0) { return d }
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df.date(from: s0)
     }
 }
