@@ -21,6 +21,7 @@ struct SettingsView: View {
 
     @AppStorage(IntervalManager.Keys.reminderAlarm) var reminderAlarmEnabled = true
     @AppStorage(IntervalManager.Keys.reminderSpeak) var reminderSpeakEnabled = true
+    @AppStorage(IntervalManager.Keys.warningSpeakEnabled) var warningSpeakEnabled = true
 
     @AppStorage(IntervalManager.Keys.teApiKey) var teApiKey: String = ""
     @AppStorage(IntervalManager.Keys.teAutoImport) var teAutoImportEnabled: Bool = false
@@ -29,6 +30,9 @@ struct SettingsView: View {
     @State private var reminders: [ReminderItem] = []
     @State private var editingItem: ReminderItem? = nil
     @State private var isAdding: Bool = false
+    @State private var warningRules: [QuietTimeWarningRule] = []
+    @State private var editingWarningRule: QuietTimeWarningRule? = nil
+    @State private var isAddingWarningRule: Bool = false
 
     var body: some View {
         Form {
@@ -104,6 +108,44 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
+            Section("警告時間帯") {
+                Toggle("警告ラベルを読み上げる", isOn: $warningSpeakEnabled)
+
+                if warningRules.isEmpty {
+                    Text("まだ登録がありません。下の「追加」で登録してください。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    let sorted = warningRules.sorted(by: { ($0.startHour, $0.startMinute) < ($1.startHour, $1.startMinute) })
+                    ForEach(sorted) { rule in
+                        Button { editingWarningRule = rule } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(timeRangeText(rule: rule)).font(.headline)
+                                    Text(rule.label.isEmpty ? "警告" : rule.label)
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+                                }
+                                Spacer()
+                                Image(systemName: rule.enabled ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(rule.enabled ? .red : .secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete(perform: deleteWarningRules)
+                }
+
+                Button { isAddingWarningRule = true } label: {
+                    Label("追加", systemImage: "plus")
+                }
+
+                Text("※ 時間帯に入るとメイン画面にフラッシュ表示され、最初の1回だけ読み上げます。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Section("指標発表（Trading Economics）") {
                 TextField("Trading Economics APIキー（c=...）", text: $teApiKey)
                     .textInputAutocapitalization(.never)
@@ -136,8 +178,12 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("設定")
-        .onAppear { reminders = mgr.getReminders() }
+        .onAppear {
+            reminders = mgr.getReminders()
+            warningRules = mgr.getWarningRules()
+        }
         .onChange(of: reminders) { _, newValue in mgr.setReminders(newValue) }
+        .onChange(of: warningRules) { _, newValue in mgr.setWarningRules(newValue) }
         .sheet(item: $editingItem) { item in
             ReminderEditorView(
                 item: item,
@@ -160,11 +206,43 @@ struct SettingsView: View {
                 onDelete: nil
             )
         }
+        .sheet(item: $editingWarningRule) { rule in
+            WarningRuleEditorView(
+                rule: rule,
+                onSave: { updated in
+                    if let idx = warningRules.firstIndex(where: { $0.id == updated.id }) {
+                        warningRules[idx] = updated
+                    }
+                },
+                onDelete: {
+                    if let idx = warningRules.firstIndex(where: { $0.id == rule.id }) {
+                        warningRules.remove(at: idx)
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $isAddingWarningRule) {
+            WarningRuleEditorView(
+                rule: QuietTimeWarningRule(startHour: 9, startMinute: 0, endHour: 10, endMinute: 0, label: "警告"),
+                onSave: { newRule in warningRules.append(newRule) },
+                onDelete: nil
+            )
+        }
     }
 
     private func delete(at offsets: IndexSet) {
         let sorted = reminders.sorted(by: { ($0.hour, $0.minute) < ($1.hour, $1.minute) })
         let idsToDelete = offsets.map { sorted[$0].id }
         reminders.removeAll { idsToDelete.contains($0.id) }
+    }
+
+    private func deleteWarningRules(at offsets: IndexSet) {
+        let sorted = warningRules.sorted(by: { ($0.startHour, $0.startMinute) < ($1.startHour, $1.startMinute) })
+        let idsToDelete = offsets.map { sorted[$0].id }
+        warningRules.removeAll { idsToDelete.contains($0.id) }
+    }
+
+    private func timeRangeText(rule: QuietTimeWarningRule) -> String {
+        String(format: "%02d:%02d〜%02d:%02d", rule.startHour, rule.startMinute, rule.endHour, rule.endMinute)
     }
 }
