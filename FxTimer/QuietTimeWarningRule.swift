@@ -1,6 +1,6 @@
 import Foundation
 
-struct QuietTimeWarningRule: Identifiable, Codable {
+struct QuietTimeWarningRule: Identifiable, Codable, Equatable {
     let id: UUID
     var startHour: Int
     var startMinute: Int

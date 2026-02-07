@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var mgr: IntervalManager
+    @State private var isFlashingWarning = false
 
     var body: some View {
         NavigationStack {
@@ -67,8 +68,38 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
                 .padding(.top, 60)
             }
+            .overlay(alignment: .top) {
+                if !mgr.warningText.isEmpty {
+                    Text(mgr.warningText)
+                        .font(.system(size: 24, weight: .bold))
+                        .multilineTextAlignment(.center)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .background(Color.red.opacity(0.9))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(radius: 6)
+                        .padding(.top, 10)
+                        .opacity(isFlashingWarning ? 1 : 0.2)
+                        .onAppear { startWarningFlash() }
+                        .onChange(of: mgr.warningText) { _, newValue in
+                            if newValue.isEmpty {
+                                isFlashingWarning = false
+                            } else {
+                                startWarningFlash()
+                            }
+                        }
+                }
+            }
             .ignoresSafeArea(edges: .bottom)
             .navigationTitle("FX Interval")
+        }
+    }
+
+    private func startWarningFlash() {
+        isFlashingWarning = false
+        withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
+            isFlashingWarning = true
         }
     }
 }

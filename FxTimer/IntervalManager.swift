@@ -33,6 +33,8 @@ final class IntervalManager: ObservableObject {
         static let remindersJson = "remindersJson"
         static let reminderAlarm = "reminderAlarmEnabled"
         static let reminderSpeak = "reminderSpeakEnabled"
+        static let warningRulesJson = "warningRulesJson"
+        static let warningSpeakEnabled = "warningSpeakEnabled"
 
         // Trading Economics
         static let teApiKey = "teApiKey"
@@ -61,6 +63,8 @@ final class IntervalManager: ObservableObject {
     @AppStorage(Keys.remindersJson) private var remindersJson: String = "[]"
     @AppStorage(Keys.reminderAlarm) var reminderAlarmEnabled: Bool = true
     @AppStorage(Keys.reminderSpeak) var reminderSpeakEnabled: Bool = true
+    @AppStorage(Keys.warningRulesJson) private var warningRulesJson: String = "[]"
+    @AppStorage(Keys.warningSpeakEnabled) var warningSpeakEnabled: Bool = true
 
     // Trading Economics（アプリ内保存）
     @AppStorage(Keys.teApiKey) var teApiKey: String = ""
@@ -73,17 +77,25 @@ final class IntervalManager: ObservableObject {
     @Published var clockText = "--:--:--"
     /// <分数:Int, 経過率 0.0‥1.0:Double>
     @Published var progress: [Int: Double] = [:]
+    @Published var warningText: String = ""
 
     // Trading Economics 取得状況（SettingsView で表示）
     @Published var indicatorStatus: String = ""
 
     //==== 内部状態 ------------------------------------------------------------
     private var timer: DispatchSourceTimer?
+    private var warningTimer: DispatchSourceTimer?
     private let speech = AVSpeechSynthesizer()
     private var silentPlayer: AVAudioPlayer?
     private let chimeSoundID: SystemSoundID = 1060
     private var lastCountdownSec: Int?
     private var isEnglish: Bool { lang == "en" }
+    private var activeWarningRuleIDs: Set<UUID> = []
+
+    init() {
+        startWarningMonitor()
+        updateWarningState(now: Date())
+    }
 
     // MARK: - 制御 ------------------------------------------------------------
     func start() {
@@ -133,6 +145,19 @@ final class IntervalManager: ObservableObject {
         if let data = try? JSONEncoder().encode(items), let str = String(data: data, encoding: .utf8) { remindersJson = str }
     }
 
+    // MARK: - 警告時間帯（読み書き） ---------------------------------------
+    func getWarningRules() -> [QuietTimeWarningRule] {
+        guard let data = warningRulesJson.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([QuietTimeWarningRule].self, from: data)) ?? []
+    }
+
+    func setWarningRules(_ items: [QuietTimeWarningRule]) {
+        if let data = try? JSONEncoder().encode(items), let str = String(data: data, encoding: .utf8) {
+            warningRulesJson = str
+        }
+        updateWarningState(now: Date())
+    }
+
     // MARK: - tick ------------------------------------------------------------
     private func tick() {
         let now = Date()
@@ -144,20 +169,27 @@ final class IntervalManager: ObservableObject {
         let hour = cal.component(.hour,   from: now)
 
         updateProgressBars(hour: hour, minute: min, second: sec)
+        let didSpeakWarning = updateWarningState(now: now)
 
         switch sec {
         case 30:
-            if announce30Sec { speakPublic(isEnglish ? "thirty seconds" : "30秒") }
+            if announce30Sec, !didSpeakWarning { speakPublic(isEnglish ? "thirty seconds" : "30秒") }
 
         case 45: // 15 秒前（1分足は除外）
             let upcomingMin  = (min + 1) % 60
             let upcomingHour = (upcomingMin == 0) ? (hour + 1) % 24 : hour
-            if let interval = selectInterval(hour: upcomingHour, minute: upcomingMin, includeOne: false) { announceAhead(interval) }
+            if !didSpeakWarning,
+               let interval = selectInterval(hour: upcomingHour, minute: upcomingMin, includeOne: false) {
+                announceAhead(interval)
+            }
 
         case 55...59: // 5 秒カウントダウン
             guard lastCountdownSec != sec else { return }
             lastCountdownSec = sec
-            if selectInterval(hour: hour, minute: min, includeOne: true) != nil { speakCountdown(60 - sec) }
+            if !didSpeakWarning,
+               selectInterval(hour: hour, minute: min, includeOne: true) != nil {
+                speakCountdown(60 - sec)
+            }
 
         case 0: // 足確定
             lastCountdownSec = nil
@@ -166,6 +198,44 @@ final class IntervalManager: ObservableObject {
         default:
             break
         }
+    }
+
+    // MARK: - 警告時間帯 ----------------------------------------------------
+    private func startWarningMonitor() {
+        guard warningTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
+        t.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(50))
+        t.setEventHandler { [weak self] in
+            guard let self, !self.isRunning else { return }
+            self.updateWarningState(now: Date())
+        }
+        t.resume()
+        warningTimer = t
+    }
+
+    @discardableResult
+    private func updateWarningState(now: Date, allowSpeak: Bool = true) -> Bool {
+        let activeItems = getWarningRules()
+            .filter { $0.enabled }
+            .filter { $0.contains(date: now) }
+
+        let activeIDs = Set(activeItems.map { $0.id })
+        let entering = activeItems.filter { !activeWarningRuleIDs.contains($0.id) }
+        activeWarningRuleIDs = activeIDs
+
+        warningText = activeItems.map { warningLabel(for: $0) }.joined(separator: "\n")
+
+        guard allowSpeak, warningSpeakEnabled, !entering.isEmpty else { return false }
+        let speakText = entering.map { warningLabel(for: $0) }.joined(separator: "、")
+        if !speakText.isEmpty {
+            speakPublic(speakText)
+        }
+        return !speakText.isEmpty
+    }
+
+    private func warningLabel(for item: QuietTimeWarningRule) -> String {
+        let trimmed = item.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "警告" : trimmed
     }
 
     // MARK: - 時計/進捗 ------------------------------------------------------
