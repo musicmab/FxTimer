@@ -183,11 +183,13 @@ final class IntervalManager: ObservableObject {
                 announceAhead(interval)
             }
 
-        case 55...59: // 5 秒カウントダウン
+        case 55...59: // 5 秒カウントダウン（次分で確定する選択足のみ）
             guard lastCountdownSec != sec else { return }
             lastCountdownSec = sec
+            let upcomingMin  = (min + 1) % 60
+            let upcomingHour = (upcomingMin == 0) ? (hour + 1) % 24 : hour
             if !didSpeakWarning,
-               selectInterval(hour: hour, minute: min, includeOne: true) != nil {
+               selectInterval(hour: upcomingHour, minute: upcomingMin, includeOne: true) != nil {
                 speakCountdown(60 - sec)
             }
 
